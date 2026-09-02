@@ -306,7 +306,7 @@ with st.expander("🔧 בדיקת חיבור"):
                     {
                         "model": MODELS_TO_TRY[0],
                         "input": "החזר את המילה תקין בלבד",
-                        "generation_config": {"thinking_level": "minimal"},
+                        "generation_config": {"thinking_level": "low"},
                     },
                     timeout=60,
                     retries=1,
@@ -381,7 +381,7 @@ if uploaded_file:
                             "mime_type": "application/json",
                             "schema": RESPONSE_SCHEMA,
                         },
-                        "generation_config": {"thinking_level": "minimal"},
+                        "generation_config": {"thinking_level": "low"},
                     }
 
                     ok, result, elapsed = run_with_progress(
