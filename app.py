@@ -14,7 +14,7 @@ st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", 
 st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# המפתח שלך מהתמונה האחרונה מוגדר כברירת מחדל
+# המפתח שלך מוגדר כברירת מחדל
 DEFAULT_API_KEY = "AQ.Ab8RN6lapSAAHOl9wsWuYuG4sVc1Z1NYL-9f2FHmKbj2uLcp7Q"
 user_api_key = st.text_input("מפתח Google API:", value=DEFAULT_API_KEY, type="password")
 
@@ -113,34 +113,39 @@ if uploaded_file:
                         ]
                     }
                     
-                    # שימוש במודל יציב בלבד
-                    model_name = "gemini-1.5-flash"
+                    # רשימת מודלים מעודכנת הפעילה ב-v1beta
+                    models_to_try = [
+                        "gemini-2.5-flash",
+                        "gemini-2.0-flash"
+                    ]
                     
                     res_data = None
                     success = False
                     last_error_msg = ""
                     api_key_clean = user_api_key.strip()
                     
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key_clean}"
-                    
-                    # ניסיונות חוזרים רק עבור שגיאת 503 (עומס)
-                    for attempt in range(2):
-                        res = requests.post(url, headers=headers, json=payload)
-                        res_json = res.json()
+                    for model_name in models_to_try:
+                        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key_clean}"
                         
-                        if "candidates" in res_json and len(res_json["candidates"]) > 0:
-                            res_data = res_json
-                            success = True
-                            break
-                        else:
-                            last_error_msg = str(res_json)
-                            if "503" in last_error_msg or "UNAVAILABLE" in last_error_msg:
-                                time.sleep(1.5)
-                            else:
+                        for attempt in range(2):
+                            res = requests.post(url, headers=headers, json=payload)
+                            res_json = res.json()
+                            
+                            if "candidates" in res_json and len(res_json["candidates"]) > 0:
+                                res_data = res_json
+                                success = True
                                 break
+                            else:
+                                last_error_msg = str(res_json)
+                                if "503" in last_error_msg or "UNAVAILABLE" in last_error_msg:
+                                    time.sleep(1.5)
+                                else:
+                                    break
+                                    
+                        if success:
+                            break
                     
                     if not success:
-                        # הדפסת הודעת השגיאה המדויקת שגוגל מחזירה
                         st.error(f"שגיאת תקשורת מול גוגל: {last_error_msg}")
                     else:
                         text_response = res_data['candidates'][0]['content']['parts'][0]['text']
