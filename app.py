@@ -5,16 +5,18 @@ import datetime
 import requests
 import base64
 import io
+import time
 from PIL import Image
 import json
 
 st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", layout="centered")
 
 st.title("📅 ממיר דוח נוכחות לאקסל")
-st.write("העלה תמונה של הדו\"ח, הכנס את מפתח ה-API וקבל קובץ אקסל מעובד ומאוזן.")
+st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# שדה להכנסת מפתח ה-API
-user_api_key = st.text_input("הכנס Google API Key:", type="password")
+# המפתח מוגדר כברירת מחדל בשדה
+DEFAULT_API_KEY = "AQ.Ab8RN6lapSAAHOl9wsWuYuG4sVc1Z1NYL-9f2FHmKbj2uLcp7Q"
+user_api_key = st.text_input("מפתח Google API:", value=DEFAULT_API_KEY, type="password")
 
 uploaded_file = st.file_uploader("צלם או העלה תמונה של הדו\"ח:", type=["jpg", "jpeg", "png"])
 
@@ -76,7 +78,7 @@ if uploaded_file:
     
     if st.button("🚀 עבד והפק אקסל", use_container_width=True):
         if not user_api_key.strip():
-            st.error("אנא הכנס את מפתח ה-API בשדה למעלה.")
+            st.error("אנא ודא שמפתח ה-API מוזן בשדה למעלה.")
         else:
             with st.spinner("מפענח את התמונה ומחשב נתונים..."):
                 try:
@@ -111,29 +113,40 @@ if uploaded_file:
                         ]
                     }
                     
+                    # רשימת מודלים נתמכים
                     models_to_try = [
-                        "gemini-2.5-flash",
+                        "gemini-2.0-flash",
                         "gemini-1.5-flash",
-                        "gemini-flash-latest"
+                        "gemini-2.5-flash",
+                        "gemini-1.5-pro"
                     ]
                     
                     res_data = None
                     success = False
                     last_error_msg = ""
-                    
                     api_key_clean = user_api_key.strip()
                     
                     for model_name in models_to_try:
                         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key_clean}"
-                        res = requests.post(url, headers=headers, json=payload)
-                        res_json = res.json()
                         
-                        if "candidates" in res_json and len(res_json["candidates"]) > 0:
-                            res_data = res_json
-                            success = True
+                        # ניסיונות חוזרים עם השהיה קצרה במקרה של עומס רגעי (503)
+                        for attempt in range(2):
+                            res = requests.post(url, headers=headers, json=payload)
+                            res_json = res.json()
+                            
+                            if "candidates" in res_json and len(res_json["candidates"]) > 0:
+                                res_data = res_json
+                                success = True
+                                break
+                            else:
+                                last_error_msg = str(res_json)
+                                if "503" in last_error_msg or "UNAVAILABLE" in last_error_msg:
+                                    time.sleep(1.5) # השהיה קצרה לפני ניסיון חוזר
+                                else:
+                                    break
+                                    
+                        if success:
                             break
-                        else:
-                            last_error_msg = str(res_json)
                     
                     if not success:
                         st.error(f"שגיאת תקשורת מול גוגל: {last_error_msg}")
