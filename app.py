@@ -3,20 +3,19 @@ import pandas as pd
 import math
 import datetime
 import openpyxl
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from PIL import Image
 import json
 
 st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", layout="centered")
 
 st.title("📅 ממיר דוח נוכחות לאקסל")
-st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ישירות לטלפון.")
+st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# הזנת מפתח API
-api_key = st.text_input("הכנס מפתח Google API Key:", type="password")
+# מפתח API מוטמע בקוד
+API_KEY = "AQ.Ab8RN6I6EfPCP8CuOz0ff-Vkrg11f1uQJvkg5mnE1qvQ1BvmeQ"
 
-uploaded_file = st.file_uploader("צלם או העלה תמונה:", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("צלם או העלה תמונה של הדו\"ח:", type=["jpg", "jpeg", "png"])
 
 def process_attendance_data(raw_days):
     processed_rows = []
@@ -34,18 +33,33 @@ def process_attendance_data(raw_days):
                 parts = str(gross_hhmm).split(":")
                 h, m = int(parts[0]), int(parts[1])
                 total_min = h * 60 + m
-                rounded_min = math.ceil(total_min / 15.0) * 15
+                
+                # עיגול סטנדרטי לרבע השעה הקרובה
+                rounded_min = round(total_min / 15.0) * 15
                 decimal_qty = rounded_min / 60.0
             except:
                 decimal_qty = 0.0
                 
+            # שורת עבודה במשרד
             processed_rows.append({
                 'מק"ט': '100101',
                 'תאור מוצר': date_str,
                 'כמות': decimal_qty,
                 'עבודה מהבית?': ''
             })
+            
+            # אם מדובר ביום חול והיו פחות מ-9 שעות - הוספת שורת השלמה מהבית
+            if not is_weekend and decimal_qty < 9.00:
+                completion_qty = round(9.00 - decimal_qty, 2)
+                processed_rows.append({
+                    'מק"ט': '100101',
+                    'תאור מוצר': date_str,
+                    'כמות': completion_qty,
+                    'עבודה מהבית?': 'Y'
+                })
+                
         elif not is_weekend:
+            # יום חול ללא דיווח נוכחות כלל -> 9 שעות מלאות מהבית
             processed_rows.append({
                 'מק"ט': '100101',
                 'תאור מוצר': date_str,
@@ -55,28 +69,26 @@ def process_attendance_data(raw_days):
             
     return pd.DataFrame(processed_rows)
 
-if uploaded_file and api_key:
+if uploaded_file:
     image = Image.open(uploaded_file)
     st.image(image, caption="התמונה שהועלתה", use_container_width=True)
     
     if st.button("🚀 עבד והפק אקסל", use_container_width=True):
         with st.spinner("מפענח את התמונה ומחשב נתונים..."):
             try:
-                client = genai.Client(api_key=api_key)
+                genai.configure(api_key=API_KEY)
+                model = genai.GenerativeModel('gemini-1.5-flash')
                 
                 prompt = """
                 חלץ מתמונת דוח הנוכחות את כל הימים בחודש.
-                החזר JSON בלבד (ללא markdown) במבנה הבא:
+                החזר JSON בלבד (ללא markdown וללא תגיות קוד) במבנה הבא:
                 [
                   {"date": "01/08/26", "day": "שב", "worked": false, "gross": null},
                   {"date": "05/08/26", "day": "ד", "worked": true, "gross": "06:22"}
                 ]
                 """
                 
-                response = client.models.generate_content(
-                    model='gemini-3.6-flash',
-                    contents=[image, prompt]
-                )
+                response = model.generate_content([prompt, image])
                 
                 clean_json = response.text.replace("```json", "").replace("```", "").strip()
                 raw_data = json.loads(clean_json)
