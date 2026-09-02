@@ -14,82 +14,135 @@ st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", 
 st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+# ---------------------------------------------------------------------------
+# Interactions API — הנתיב היחיד שתומך במפתחות הרשאה בפורמט AQ.
+# ---------------------------------------------------------------------------
+INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 
-# רשימת מודלים פעילים (gemini-2.0-flash הושבת ב-01/06/2026)
 MODELS_TO_TRY = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-2.5-flash",
 ]
 
+# סכימת JSON שמכריחה את המודל להחזיר מבנה קבוע
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "days": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string"},
+                    "day": {"type": "string"},
+                    "worked": {"type": "boolean"},
+                    "gross": {"type": "string"},
+                },
+                "required": ["date", "day", "worked", "gross"],
+            },
+        }
+    },
+    "required": ["days"],
+}
+
+PROMPT = (
+    "חלץ מתמונת דוח הנוכחות את כל הימים בחודש, לפי הסדר.\n"
+    "עבור כל יום החזר:\n"
+    "date - התאריך כפי שמופיע בדוח, בפורמט DD/MM/YY.\n"
+    "day - אות היום בעברית כפי שמופיעה בדוח (א, ב, ג, ד, ה, ו, שב).\n"
+    "worked - true אם יש דיווח נוכחות באותו יום, אחרת false.\n"
+    "gross - סך השעות ברוטו בפורמט HH:MM. אם אין דיווח, החזר מחרוזת ריקה.\n"
+    "אל תדלג על ימים ואל תמציא נתונים."
+)
+
 # ---------------------------------------------------------------------------
-# ניהול אישורים
+# ניהול מפתח
 # ---------------------------------------------------------------------------
-# מומלץ להגדיר את המפתח ב-.streamlit/secrets.toml בשורה:  GOOGLE_API_KEY = "AIza..."
 default_key = ""
 try:
-    default_key = st.secrets.get("GOOGLE_API_KEY", "")
+    default_key = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
     default_key = ""
 
 user_api_key = st.text_input(
-    "מפתח Google API (מתחיל ב-AIza):",
+    "מפתח Gemini API:",
     value=default_key,
     type="password",
-    help="צור מפתח בכתובת https://aistudio.google.com/apikey . טוקן OAuth שמתחיל ב-AQ. אינו מפתח API.",
+    help="מפתחות חדשים מ-AI Studio מתחילים ב-AQ. וזה תקין. https://aistudio.google.com/apikey",
 )
 
 
-def build_auth(key: str):
-    """מחזיר (headers, query_params) לפי סוג האישור שהוזן."""
-    key = key.strip()
-    headers = {"Content-Type": "application/json"}
-    params = {}
-    if key.startswith("AIza"):
-        params["key"] = key
-    else:
-        # טוקן OAuth (AQ. / ya29.) חייב לעבור בכותרת Authorization ולא בפרמטר key
-        headers["Authorization"] = f"Bearer {key}"
-    return headers, params
+def auth_headers(key: str) -> dict:
+    return {
+        "Content-Type": "application/json",
+        "x-goog-api-key": key.strip(),
+    }
 
 
-def key_kind(key: str) -> str:
-    key = key.strip()
-    if not key:
-        return "empty"
-    if key.startswith("AIza"):
-        return "api_key"
-    if key.startswith(("AQ.", "ya29.")):
-        return "oauth"
-    return "unknown"
+# ---------------------------------------------------------------------------
+# חילוץ הטקסט מתשובת ה-Interactions API
+# ---------------------------------------------------------------------------
+def extract_output_text(payload) -> str:
+    """אוסף את כל בלוקי הטקסט מתשובת ה-API, בלי להסתמך על מבנה קשיח."""
+    if isinstance(payload, dict) and isinstance(payload.get("output_text"), str):
+        return payload["output_text"]
+
+    chunks = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "text" and isinstance(node.get("text"), str):
+                chunks.append(node["text"])
+            elif isinstance(node.get("output_text"), str):
+                chunks.append(node["output_text"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return "\n".join(chunks).strip()
+
+
+def parse_days(text: str):
+    cleaned = text.replace("```json", "").replace("```", "").strip()
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}|\[.*\]", cleaned, re.DOTALL)
+        if not match:
+            raise
+        data = json.loads(match.group(0))
+
+    if isinstance(data, dict):
+        return data.get("days", [])
+    return data
 
 
 # ---------------------------------------------------------------------------
 # עיבוד הנתונים
 # ---------------------------------------------------------------------------
-WEEKEND_NAMES = {"ו", "שב", "שישי", "שבת", "ש"}
+WEEKEND_NAMES = {"ו", "ש", "שב", "שישי", "שבת"}
 
 
 def process_attendance_data(raw_days):
     processed_rows = []
 
     for item in raw_days:
-        date_str = item.get("date", "")
+        date_str = str(item.get("date", "")).strip()
         is_worked = bool(item.get("worked", False))
         day_name = str(item.get("day", "")).strip()
-        gross_hhmm = item.get("gross", None)
+        gross_hhmm = str(item.get("gross", "") or "").strip()
 
         is_weekend = day_name in WEEKEND_NAMES
 
         if is_worked and gross_hhmm:
             try:
-                parts = str(gross_hhmm).split(":")
-                h, m = int(parts[0]), int(parts[1])
-                total_min = h * 60 + m
+                h_str, m_str = gross_hhmm.split(":")[:2]
+                total_min = int(h_str) * 60 + int(m_str)
                 # עיגול לרבע השעה הקרובה
-                rounded_min = round(total_min / 15.0) * 15
-                decimal_qty = round(rounded_min / 60.0, 2)
+                decimal_qty = round((round(total_min / 15.0) * 15) / 60.0, 2)
             except Exception:
                 decimal_qty = 0.0
 
@@ -103,11 +156,10 @@ def process_attendance_data(raw_days):
 
             # השלמה ל-9 שעות יומית בימי חול
             if not is_weekend and decimal_qty < 9.00:
-                completion_qty = round(9.00 - decimal_qty, 2)
                 processed_rows.append({
                     'מק"ט': "100101",
                     "תאור מוצר": date_str,
-                    "כמות": completion_qty,
+                    "כמות": round(9.00 - decimal_qty, 2),
                     "עבודה מהבית?": "Y",
                 })
 
@@ -123,18 +175,6 @@ def process_attendance_data(raw_days):
     return pd.DataFrame(processed_rows)
 
 
-def extract_json(text: str):
-    """מנקה ```json ומחלץ את מערך ה-JSON גם אם יש טקסט מסביב."""
-    cleaned = text.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        raise
-
-
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -142,40 +182,46 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def call_interactions(key: str, body: dict, timeout: int = 120):
+    """מחזיר (success, data_or_error_dict)."""
+    res = requests.post(
+        INTERACTIONS_URL, headers=auth_headers(key), json=body, timeout=timeout
+    )
+    try:
+        data = res.json()
+    except ValueError:
+        return False, {"message": f"תגובה לא תקינה מהשרת (HTTP {res.status_code})"}
+
+    if res.status_code >= 400 or "error" in data:
+        err = data.get("error", {})
+        return False, {
+            "code": err.get("code", res.status_code),
+            "message": err.get("message", str(data)),
+        }
+    return True, data
+
+
 # ---------------------------------------------------------------------------
 # בדיקת חיבור
 # ---------------------------------------------------------------------------
-with st.expander("🔧 בדיקת חיבור ומודלים זמינים"):
-    kind = key_kind(user_api_key)
-    if kind == "oauth":
-        st.warning(
-            "האישור שהוזן נראה כמו טוקן OAuth (מתחיל ב-AQ. או ya29.) ולא כמפתח API. "
-            "הוא יישלח בכותרת Authorization, אך תוקפו פג תוך כשעה. "
-            "מומלץ ליצור מפתח קבוע ב-https://aistudio.google.com/apikey"
-        )
-    elif kind == "unknown" and user_api_key.strip():
-        st.warning("פורמט המפתח לא מזוהה. מפתח API תקין מתחיל ב-AIza.")
-
-    if st.button("בדוק אילו מודלים זמינים"):
+with st.expander("🔧 בדיקת חיבור"):
+    st.caption(
+        "האפליקציה משתמשת ב-Interactions API. הנתיב הישן "
+        "models/{model}:generateContent אינו תומך במפתחות AQ. ומחזיר 401."
+    )
+    if st.button("שלח בקשת בדיקה"):
         if not user_api_key.strip():
             st.error("אנא הזן מפתח API.")
         else:
-            headers, params = build_auth(user_api_key)
-            try:
-                r = requests.get(f"{API_BASE}/models", headers=headers, params=params, timeout=30)
-                data = r.json()
-                if "models" in data:
-                    names = [
-                        m["name"].replace("models/", "")
-                        for m in data["models"]
-                        if "generateContent" in m.get("supportedGenerationMethods", [])
-                    ]
-                    st.success("החיבור תקין. מודלים שתומכים ב-generateContent:")
-                    st.write(names)
-                else:
-                    st.error(f"תגובת שגיאה מגוגל: {data}")
-            except Exception as e:
-                st.error(f"שגיאה בבדיקה: {e}")
+            ok, result = call_interactions(
+                user_api_key,
+                {"model": MODELS_TO_TRY[0], "input": "החזר את המילה תקין בלבד"},
+                timeout=60,
+            )
+            if ok:
+                st.success(f"החיבור תקין. תגובת המודל: {extract_output_text(result)}")
+            else:
+                st.error(f"שגיאה {result.get('code')}: {result.get('message')}")
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +239,6 @@ if uploaded_file:
         else:
             with st.spinner("מפענח את התמונה ומחשב נתונים..."):
                 try:
-                    # הקטנת תמונות ענקיות כדי לחסוך זמן וטוקנים
                     img = image.convert("RGB")
                     max_side = 2000
                     if max(img.size) > max_side:
@@ -207,110 +252,82 @@ if uploaded_file:
                     img.save(buffered, format="JPEG", quality=90)
                     img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-                    prompt = (
-                        "חלץ מתמונת דוח הנוכחות את כל הימים בחודש.\n"
-                        "החזר מערך JSON בלבד, ללא markdown וללא טקסט נוסף, במבנה הבא:\n"
-                        '[\n'
-                        '  {"date": "01/08/26", "day": "שב", "worked": false, "gross": null},\n'
-                        '  {"date": "05/08/26", "day": "ד", "worked": true, "gross": "06:22"}\n'
-                        ']\n'
-                        'השדה day הוא אות היום בעברית כפי שמופיע בדוח. '
-                        'השדה gross הוא סך השעות ברוטו בפורמט HH:MM, או null אם אין דיווח.'
-                    )
-
-                    payload = {
-                        "contents": [
-                            {
-                                "role": "user",
-                                "parts": [
-                                    {"text": prompt},
-                                    {
-                                        "inline_data": {
-                                            "mime_type": "image/jpeg",
-                                            "data": img_b64,
-                                        }
-                                    },
-                                ],
-                            }
-                        ],
-                        "generationConfig": {
-                            "temperature": 0,
-                            "response_mime_type": "application/json",
-                        },
-                    }
-
-                    headers, params = build_auth(user_api_key)
-
-                    res_data = None
-                    success = False
-                    last_error_msg = ""
+                    result_data = None
+                    last_error = ""
 
                     for model_name in MODELS_TO_TRY:
-                        url = f"{API_BASE}/models/{model_name}:generateContent"
+                        body = {
+                            "model": model_name,
+                            # הטקסט לפני התמונה — המלצת גוגל לדיוק טוב יותר
+                            "input": [
+                                {"type": "text", "text": PROMPT},
+                                {
+                                    "type": "image",
+                                    "data": img_b64,
+                                    "mime_type": "image/jpeg",
+                                },
+                            ],
+                            "response_format": {
+                                "type": "text",
+                                "mime_type": "application/json",
+                                "schema": RESPONSE_SCHEMA,
+                            },
+                        }
 
+                        stop_all = False
                         for attempt in range(2):
-                            try:
-                                res = requests.post(
-                                    url, headers=headers, params=params,
-                                    json=payload, timeout=120,
-                                )
-                                res_json = res.json()
-                            except Exception as req_err:
-                                last_error_msg = str(req_err)
-                                time.sleep(1.5)
-                                continue
-
-                            if res_json.get("candidates"):
-                                res_data = res_json
-                                success = True
+                            ok, result = call_interactions(user_api_key, body)
+                            if ok:
+                                result_data = result
                                 break
 
-                            err = res_json.get("error", {})
-                            code = err.get("code")
-                            last_error_msg = err.get("message", str(res_json))
+                            code = result.get("code")
+                            last_error = f"{code}: {result.get('message')}"
 
-                            if code == 401 or code == 403:
-                                # בעיית אישור — אין טעם לנסות מודלים נוספים
-                                success = False
-                                MODELS_TO_TRY = []
+                            if code in (401, 403):
+                                stop_all = True
                                 break
                             if code == 404:
-                                break  # מודל לא קיים -> עבור למודל הבא
+                                break  # מודל לא זמין -> נסה את הבא
                             if code in (429, 500, 503):
                                 time.sleep(2)
                                 continue
                             break
 
-                        if success or not MODELS_TO_TRY:
+                        if result_data or stop_all:
                             break
 
-                    if not success:
-                        st.error(f"שגיאת תקשורת מול גוגל: {last_error_msg}")
-                        if "authentication" in last_error_msg.lower() or "API key" in last_error_msg:
+                    if not result_data:
+                        st.error(f"שגיאת תקשורת מול גוגל: {last_error}")
+                        if last_error.startswith(("401", "403")):
                             st.info(
-                                "נראה שהאישור אינו מפתח API תקין. "
-                                "צור מפתח חדש בכתובת https://aistudio.google.com/apikey "
-                                "(המפתח אמור להתחיל ב-AIza)."
+                                "אם השגיאה היא ACCESS_TOKEN_TYPE_UNSUPPORTED, ודא שהמפתח לא נמחק "
+                                "ושהוא נוצר בפרויקט פעיל ב-https://aistudio.google.com/apikey"
                             )
                     else:
-                        text_response = res_data["candidates"][0]["content"]["parts"][0]["text"]
-                        raw_data = extract_json(text_response)
+                        raw_text = extract_output_text(result_data)
+                        if not raw_text:
+                            st.error("המודל לא החזיר טקסט. תגובה גולמית:")
+                            st.json(result_data)
+                        else:
+                            raw_days = parse_days(raw_text)
+                            df = process_attendance_data(raw_days)
 
-                        df = process_attendance_data(raw_data)
+                            if df.empty:
+                                st.warning("לא זוהו ימים בדוח. נסה תמונה חדה יותר.")
+                                st.code(raw_text)
+                            else:
+                                st.success("העיבוד הושלם בהצלחה!")
+                                st.dataframe(df, use_container_width=True)
+                                st.caption(f"סה\"כ שעות בדוח: {df['כמות'].sum():.2f}")
 
-                        st.success("העיבוד הושלם בהצלחה!")
-                        st.dataframe(df, use_container_width=True)
-
-                        total = df["כמות"].sum() if not df.empty else 0
-                        st.caption(f"סה\"כ שעות בדוח: {total:.2f}")
-
-                        st.download_button(
-                            label="📥 הורד קובץ אקסל",
-                            data=to_excel_bytes(df),
-                            file_name=f"attendance_{datetime.date.today()}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                        )
+                                st.download_button(
+                                    label="📥 הורד קובץ אקסל",
+                                    data=to_excel_bytes(df),
+                                    file_name=f"attendance_{datetime.date.today()}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    use_container_width=True,
+                                )
 
                 except Exception as e:
                     st.error(f"שגיאה בעיבוד: {e}")
