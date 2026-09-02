@@ -13,7 +13,7 @@ st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", 
 st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# המפתח שלך
+# המפתח שלך מ-Google AI Studio
 API_KEY = "AQ.Ab8RN6lapSAAHOl9wsWuYuG4sVc1Z1NYL-9f2FHmKbj2uLcp7Q"
 
 uploaded_file = st.file_uploader("צלם או העלה תמונה של הדו\"ח:", type=["jpg", "jpeg", "png"])
@@ -83,8 +83,7 @@ if uploaded_file:
                 img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
                 
                 headers = {
-                    "Content-Type": "application/json",
-                    "X-goog-api-key": API_KEY
+                    "Content-Type": "application/json"
                 }
                 
                 prompt = """
@@ -112,10 +111,10 @@ if uploaded_file:
                     ]
                 }
                 
-                # רשימת מודלים לניסיון
+                # רשימת מודלים לניסיון עם העברת המפתח כפרמטר ב-URL
                 models_to_try = [
+                    "gemini-2.5-flash",
                     "gemini-1.5-flash",
-                    "gemini-2.0-flash",
                     "gemini-flash-latest"
                 ]
                 
@@ -124,7 +123,7 @@ if uploaded_file:
                 last_error_msg = ""
                 
                 for model_name in models_to_try:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
                     res = requests.post(url, headers=headers, json=payload)
                     res_json = res.json()
                     
