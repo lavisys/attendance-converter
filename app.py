@@ -15,7 +15,7 @@ st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
 # המפתח שלך מוגדר כברירת מחדל
-DEFAULT_API_KEY = "AQ.Ab8RN6lapSAAHOl9wsWuYuG4sVc1Z1NYL-9f2FHmKbj2uLcp7Q"
+DEFAULT_API_KEY = "AQ.Ab8RN6KS2bqQQJ_owdvVDNCsEO6B1w03fn6finhH7aMFPKVgqg"
 user_api_key = st.text_input("מפתח Google API:", value=DEFAULT_API_KEY, type="password")
 
 uploaded_file = st.file_uploader("צלם או העלה תמונה של הדו\"ח:", type=["jpg", "jpeg", "png"])
@@ -115,7 +115,7 @@ if uploaded_file:
                     
                     # רשימת מודלים מעודכנת הפעילה ב-v1beta
                     models_to_try = [
-                        "gemini-2.5-flash",
+                        "gemini-3.6-flash",
                         "gemini-2.0-flash"
                     ]
                     
