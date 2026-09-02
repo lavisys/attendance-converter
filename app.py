@@ -7,6 +7,7 @@ import io
 import time
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 
 st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", layout="centered")
@@ -17,14 +18,14 @@ st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעו�
 # ---------------------------------------------------------------------------
 # Interactions API — הנתיב היחיד שתומך במפתחות הרשאה בפורמט AQ.
 # ---------------------------------------------------------------------------
-INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+API_ROOT = "https://generativelanguage.googleapis.com"
+INTERACTIONS_URL = f"{API_ROOT}/v1beta/interactions"
 
 MODELS_TO_TRY = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
 ]
 
-# סכימת JSON שמכריחה את המודל להחזיר מבנה קבוע
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -56,34 +57,139 @@ PROMPT = (
 )
 
 # ---------------------------------------------------------------------------
-# ניהול מפתח
+# ניהול מפתח — נטען אוטומטית מ-Secrets של Streamlit Cloud
 # ---------------------------------------------------------------------------
-default_key = ""
+secret_key = ""
 try:
-    default_key = st.secrets.get("GEMINI_API_KEY", "")
+    secret_key = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
-    default_key = ""
+    secret_key = ""
 
-user_api_key = st.text_input(
-    "מפתח Gemini API:",
-    value=default_key,
-    type="password",
-    help="מפתחות חדשים מ-AI Studio מתחילים ב-AQ. וזה תקין. https://aistudio.google.com/apikey",
-)
+if secret_key:
+    user_api_key = secret_key
+    st.caption("🔑 המפתח נטען מהגדרות ה-Secrets של האפליקציה.")
+else:
+    user_api_key = st.text_input(
+        "מפתח Gemini API:",
+        value="",
+        type="password",
+        help="הגדר GEMINI_API_KEY תחת Manage app → Settings → Secrets כדי לא להזין כל פעם.",
+    )
 
 
 def auth_headers(key: str) -> dict:
     return {
         "Content-Type": "application/json",
-        "x-goog-api-key": key.strip(),
+        "x-goog-api-key": str(key).strip(),
     }
 
 
 # ---------------------------------------------------------------------------
-# חילוץ הטקסט מתשובת ה-Interactions API
+# תקשורת מול ה-API — לעולם לא זורקת חריגה
+# ---------------------------------------------------------------------------
+def call_interactions(key: str, body: dict, timeout: int = 180, retries: int = 1):
+    last_err = {"code": None, "message": "שגיאה לא ידועה"}
+
+    for attempt in range(retries + 1):
+        try:
+            res = requests.post(
+                INTERACTIONS_URL,
+                headers=auth_headers(key),
+                json=body,
+                timeout=(15, timeout),  # (חיבור, קריאה)
+            )
+        except requests.exceptions.ReadTimeout:
+            last_err = {"code": "timeout", "message": f"המודל לא הגיב תוך {timeout} שניות."}
+            continue
+        except requests.exceptions.ConnectTimeout:
+            last_err = {"code": "timeout", "message": "פסק זמן בהתחברות לשרת של גוגל."}
+            continue
+        except requests.exceptions.ConnectionError as e:
+            last_err = {"code": "network", "message": f"בעיית רשת: {e}"}
+            continue
+        except requests.exceptions.RequestException as e:
+            last_err = {"code": "request", "message": str(e)}
+            break
+
+        try:
+            data = res.json()
+        except ValueError:
+            snippet = (res.text or "")[:300]
+            return False, {
+                "code": res.status_code,
+                "message": f"תגובה שאינה JSON (HTTP {res.status_code}): {snippet}",
+            }
+
+        if res.status_code >= 400 or "error" in data:
+            err = data.get("error", {})
+            code = err.get("code", res.status_code)
+            msg = err.get("message", str(data))
+            if code in (429, 500, 503) and attempt < retries:
+                time.sleep(2)
+                last_err = {"code": code, "message": msg}
+                continue
+            return False, {"code": code, "message": msg}
+
+        return True, data
+
+    return False, last_err
+
+
+def ping_server(timeout: int = 10):
+    """בדיקה מהירה שהשרת של גוגל נגיש בכלל, ללא תלות במפתח."""
+    try:
+        requests.head(API_ROOT, timeout=timeout)
+        return True, ""
+    except requests.exceptions.RequestException as e:
+        return False, str(e)
+
+
+# ---------------------------------------------------------------------------
+# הרצה עם אינדיקציה חיה
+# ---------------------------------------------------------------------------
+def stage_text(elapsed: float) -> str:
+    if elapsed < 3:
+        return "פותח חיבור לשרת של גוגל"
+    if elapsed < 10:
+        return "שולח את הבקשה"
+    if elapsed < 30:
+        return "המודל מעבד את הבקשה"
+    if elapsed < 90:
+        return "המודל עדיין עובד, זה תקין עבור תמונות מפורטות"
+    return "לוקח יותר מהרגיל, ממתין לתשובה"
+
+
+def run_with_progress(key: str, body: dict, timeout: int, retries: int, headline: str):
+    """מריץ את הקריאה ב-thread ומעדכן את המסך בזמן אמת."""
+    status_box = st.empty()
+    bar = st.progress(0)
+    started = time.time()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(call_interactions, key, body, timeout, retries)
+
+        while not future.done():
+            elapsed = time.time() - started
+            status_box.info(
+                f"⏳ {headline} — {stage_text(elapsed)}… ({elapsed:.0f} שניות)"
+            )
+            bar.progress(min(int((elapsed / timeout) * 100), 99))
+            time.sleep(0.2)
+
+        ok, result = future.result()
+
+    elapsed = time.time() - started
+    bar.progress(100)
+    time.sleep(0.15)
+    bar.empty()
+    status_box.empty()
+    return ok, result, elapsed
+
+
+# ---------------------------------------------------------------------------
+# חילוץ הטקסט מתשובת ה-API
 # ---------------------------------------------------------------------------
 def extract_output_text(payload) -> str:
-    """אוסף את כל בלוקי הטקסט מתשובת ה-API, בלי להסתמך על מבנה קשיח."""
     if isinstance(payload, dict) and isinstance(payload.get("output_text"), str):
         return payload["output_text"]
 
@@ -141,12 +247,10 @@ def process_attendance_data(raw_days):
             try:
                 h_str, m_str = gross_hhmm.split(":")[:2]
                 total_min = int(h_str) * 60 + int(m_str)
-                # עיגול לרבע השעה הקרובה
                 decimal_qty = round((round(total_min / 15.0) * 15) / 60.0, 2)
             except Exception:
                 decimal_qty = 0.0
 
-            # שורת עבודה במשרד
             processed_rows.append({
                 'מק"ט': "100101",
                 "תאור מוצר": date_str,
@@ -154,7 +258,6 @@ def process_attendance_data(raw_days):
                 "עבודה מהבית?": "",
             })
 
-            # השלמה ל-9 שעות יומית בימי חול
             if not is_weekend and decimal_qty < 9.00:
                 processed_rows.append({
                     'מק"ט': "100101",
@@ -164,7 +267,6 @@ def process_attendance_data(raw_days):
                 })
 
         elif not is_weekend:
-            # יום חול ללא דיווח נוכחות כלל -> 9 שעות מלאות מהבית
             processed_rows.append({
                 'מק"ט': "100101",
                 "תאור מוצר": date_str,
@@ -182,46 +284,46 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-def call_interactions(key: str, body: dict, timeout: int = 120):
-    """מחזיר (success, data_or_error_dict)."""
-    res = requests.post(
-        INTERACTIONS_URL, headers=auth_headers(key), json=body, timeout=timeout
-    )
-    try:
-        data = res.json()
-    except ValueError:
-        return False, {"message": f"תגובה לא תקינה מהשרת (HTTP {res.status_code})"}
-
-    if res.status_code >= 400 or "error" in data:
-        err = data.get("error", {})
-        return False, {
-            "code": err.get("code", res.status_code),
-            "message": err.get("message", str(data)),
-        }
-    return True, data
-
-
 # ---------------------------------------------------------------------------
 # בדיקת חיבור
 # ---------------------------------------------------------------------------
 with st.expander("🔧 בדיקת חיבור"):
-    st.caption(
-        "האפליקציה משתמשת ב-Interactions API. הנתיב הישן "
-        "models/{model}:generateContent אינו תומך במפתחות AQ. ומחזיר 401."
-    )
+    st.caption("שולח בקשת טקסט קצרה כדי לוודא שהמפתח והמודל עובדים.")
     if st.button("שלח בקשת בדיקה"):
-        if not user_api_key.strip():
+        if not str(user_api_key).strip():
             st.error("אנא הזן מפתח API.")
         else:
-            ok, result = call_interactions(
-                user_api_key,
-                {"model": MODELS_TO_TRY[0], "input": "החזר את המילה תקין בלבד"},
-                timeout=60,
-            )
-            if ok:
-                st.success(f"החיבור תקין. תגובת המודל: {extract_output_text(result)}")
+            net_box = st.empty()
+            net_box.info("🌐 בודק נגישות לשרת של גוגל…")
+            reachable, net_err = ping_server()
+            if not reachable:
+                net_box.empty()
+                st.error(f"אין גישה לשרת של גוגל: {net_err}")
             else:
-                st.error(f"שגיאה {result.get('code')}: {result.get('message')}")
+                net_box.success("🌐 השרת נגיש. שולח בקשה למודל…")
+                ok, result, elapsed = run_with_progress(
+                    user_api_key,
+                    {
+                        "model": MODELS_TO_TRY[0],
+                        "input": "החזר את המילה תקין בלבד",
+                        "generation_config": {"thinking_level": "minimal"},
+                    },
+                    timeout=60,
+                    retries=1,
+                    headline="בודק תקשורת",
+                )
+                net_box.empty()
+
+                if ok:
+                    st.success(
+                        f"✅ החיבור תקין ({elapsed:.1f} שניות). "
+                        f"תגובת המודל: {extract_output_text(result)}"
+                    )
+                else:
+                    st.error(
+                        f"❌ שגיאה [{result.get('code')}] אחרי {elapsed:.1f} שניות: "
+                        f"{result.get('message')}"
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,100 +336,106 @@ if uploaded_file:
     st.image(image, caption="התמונה שהועלתה", use_container_width=True)
 
     if st.button("🚀 עבד והפק אקסל", use_container_width=True):
-        if not user_api_key.strip():
-            st.error("אנא ודא שמפתח ה-API מוזן בשדה למעלה.")
+        if not str(user_api_key).strip():
+            st.error("אנא ודא שמפתח ה-API מוגדר.")
         else:
-            with st.spinner("מפענח את התמונה ומחשב נתונים..."):
-                try:
-                    img = image.convert("RGB")
-                    max_side = 2000
-                    if max(img.size) > max_side:
-                        ratio = max_side / max(img.size)
-                        img = img.resize(
-                            (int(img.width * ratio), int(img.height * ratio)),
-                            Image.LANCZOS,
-                        )
+            try:
+                prep_box = st.empty()
+                prep_box.info("🖼️ מכין את התמונה לשליחה…")
 
-                    buffered = io.BytesIO()
-                    img.save(buffered, format="JPEG", quality=90)
-                    img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                img = image.convert("RGB")
+                max_side = 2000
+                if max(img.size) > max_side:
+                    ratio = max_side / max(img.size)
+                    img = img.resize(
+                        (int(img.width * ratio), int(img.height * ratio)),
+                        Image.LANCZOS,
+                    )
 
-                    result_data = None
-                    last_error = ""
+                buffered = io.BytesIO()
+                img.save(buffered, format="JPEG", quality=90)
+                img_bytes = buffered.getvalue()
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
-                    for model_name in MODELS_TO_TRY:
-                        body = {
-                            "model": model_name,
-                            # הטקסט לפני התמונה — המלצת גוגל לדיוק טוב יותר
-                            "input": [
-                                {"type": "text", "text": PROMPT},
-                                {
-                                    "type": "image",
-                                    "data": img_b64,
-                                    "mime_type": "image/jpeg",
-                                },
-                            ],
-                            "response_format": {
-                                "type": "text",
-                                "mime_type": "application/json",
-                                "schema": RESPONSE_SCHEMA,
+                prep_box.info(
+                    f"🖼️ התמונה מוכנה ({len(img_bytes) / 1024:.0f} KB, "
+                    f"{img.width}x{img.height})."
+                )
+
+                result_data = None
+                last_error = {}
+
+                for model_name in MODELS_TO_TRY:
+                    body = {
+                        "model": model_name,
+                        "input": [
+                            {"type": "text", "text": PROMPT},
+                            {
+                                "type": "image",
+                                "data": img_b64,
+                                "mime_type": "image/jpeg",
                             },
-                        }
+                        ],
+                        "response_format": {
+                            "type": "text",
+                            "mime_type": "application/json",
+                            "schema": RESPONSE_SCHEMA,
+                        },
+                        "generation_config": {"thinking_level": "minimal"},
+                    }
 
-                        stop_all = False
-                        for attempt in range(2):
-                            ok, result = call_interactions(user_api_key, body)
-                            if ok:
-                                result_data = result
-                                break
+                    ok, result, elapsed = run_with_progress(
+                        user_api_key,
+                        body,
+                        timeout=180,
+                        retries=1,
+                        headline=f"מפענח באמצעות {model_name}",
+                    )
 
-                            code = result.get("code")
-                            last_error = f"{code}: {result.get('message')}"
+                    if ok:
+                        result_data = result
+                        prep_box.success(f"📡 התקבלה תשובה תוך {elapsed:.1f} שניות.")
+                        break
 
-                            if code in (401, 403):
-                                stop_all = True
-                                break
-                            if code == 404:
-                                break  # מודל לא זמין -> נסה את הבא
-                            if code in (429, 500, 503):
-                                time.sleep(2)
-                                continue
-                            break
+                    last_error = result
+                    if result.get("code") in (401, 403):
+                        break  # בעיית הרשאה — אין טעם לנסות מודל אחר
+                    st.warning(
+                        f"{model_name} נכשל [{result.get('code')}], מנסה מודל הבא…"
+                    )
 
-                        if result_data or stop_all:
-                            break
-
-                    if not result_data:
-                        st.error(f"שגיאת תקשורת מול גוגל: {last_error}")
-                        if last_error.startswith(("401", "403")):
-                            st.info(
-                                "אם השגיאה היא ACCESS_TOKEN_TYPE_UNSUPPORTED, ודא שהמפתח לא נמחק "
-                                "ושהוא נוצר בפרויקט פעיל ב-https://aistudio.google.com/apikey"
-                            )
+                if not result_data:
+                    prep_box.empty()
+                    st.error(
+                        f"שגיאת תקשורת מול גוגל [{last_error.get('code')}]: "
+                        f"{last_error.get('message')}"
+                    )
+                    if last_error.get("code") == "timeout":
+                        st.info("נסה שוב, או צלם את הדוח ברזולוציה נמוכה יותר.")
+                else:
+                    raw_text = extract_output_text(result_data)
+                    if not raw_text:
+                        st.error("המודל לא החזיר טקסט. תגובה גולמית:")
+                        st.json(result_data)
                     else:
-                        raw_text = extract_output_text(result_data)
-                        if not raw_text:
-                            st.error("המודל לא החזיר טקסט. תגובה גולמית:")
-                            st.json(result_data)
+                        raw_days = parse_days(raw_text)
+                        df = process_attendance_data(raw_days)
+
+                        if df.empty:
+                            st.warning("לא זוהו ימים בדוח. נסה תמונה חדה יותר.")
+                            st.code(raw_text)
                         else:
-                            raw_days = parse_days(raw_text)
-                            df = process_attendance_data(raw_days)
+                            st.success("העיבוד הושלם בהצלחה!")
+                            st.dataframe(df, use_container_width=True)
+                            st.caption(f"סה\"כ שעות בדוח: {df['כמות'].sum():.2f}")
 
-                            if df.empty:
-                                st.warning("לא זוהו ימים בדוח. נסה תמונה חדה יותר.")
-                                st.code(raw_text)
-                            else:
-                                st.success("העיבוד הושלם בהצלחה!")
-                                st.dataframe(df, use_container_width=True)
-                                st.caption(f"סה\"כ שעות בדוח: {df['כמות'].sum():.2f}")
+                            st.download_button(
+                                label="📥 הורד קובץ אקסל",
+                                data=to_excel_bytes(df),
+                                file_name=f"attendance_{datetime.date.today()}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                            )
 
-                                st.download_button(
-                                    label="📥 הורד קובץ אקסל",
-                                    data=to_excel_bytes(df),
-                                    file_name=f"attendance_{datetime.date.today()}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    use_container_width=True,
-                                )
-
-                except Exception as e:
-                    st.error(f"שגיאה בעיבוד: {e}")
+            except Exception as e:
+                st.error(f"שגיאה בעיבוד: {e}")
