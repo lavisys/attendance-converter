@@ -3,7 +3,7 @@ import pandas as pd
 import math
 import datetime
 import openpyxl
-import google.generativeai as genai
+from google import genai
 from PIL import Image
 import json
 
@@ -12,7 +12,7 @@ st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", 
 st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# מפתח API מוטמע ישירות בקוד (ללא שדה קלט במסך)
+# מפתח API מוטמע בקוד
 API_KEY = "AQ.Ab8RN6I6EfPCP8CuOz0ff-Vkrg11f1uQJvkg5mnE1qvQ1BvmeQ"
 
 uploaded_file = st.file_uploader("צלם או העלה תמונה של הדו\"ח:", type=["jpg", "jpeg", "png"])
@@ -34,7 +34,7 @@ def process_attendance_data(raw_days):
                 h, m = int(parts[0]), int(parts[1])
                 total_min = h * 60 + m
                 
-                # עיגול סטנדרטי לרבע השעה הקרובה
+                # עיגול לרבע השעה הקרובה
                 rounded_min = round(total_min / 15.0) * 15
                 decimal_qty = rounded_min / 60.0
             except:
@@ -48,7 +48,7 @@ def process_attendance_data(raw_days):
                 'עבודה מהבית?': ''
             })
             
-            # אם מדובר ביום חול והיו פחות מ-9 שעות - הוספת שורת השלמה מהבית
+            # השלמה ל-9 שעות יומית בימי חול
             if not is_weekend and decimal_qty < 9.00:
                 completion_qty = round(9.00 - decimal_qty, 2)
                 processed_rows.append({
@@ -76,8 +76,7 @@ if uploaded_file:
     if st.button("🚀 עבד והפק אקסל", use_container_width=True):
         with st.spinner("מפענח את התמונה ומחשב נתונים..."):
             try:
-                genai.configure(api_key=API_KEY)
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                client = genai.Client(api_key=API_KEY)
                 
                 prompt = """
                 חלץ מתמונת דוח הנוכחות את כל הימים בחודש.
@@ -88,7 +87,10 @@ if uploaded_file:
                 ]
                 """
                 
-                response = model.generate_content([prompt, image])
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[image, prompt]
+                )
                 
                 clean_json = response.text.replace("```json", "").replace("```", "").strip()
                 raw_data = json.loads(clean_json)
