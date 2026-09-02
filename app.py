@@ -14,7 +14,7 @@ st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", 
 st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# המפתח מוגדר כברירת מחדל בשדה
+# המפתח שלך מוגדר כברירת מחדל
 DEFAULT_API_KEY = "AQ.Ab8RN6lapSAAHOl9wsWuYuG4sVc1Z1NYL-9f2FHmKbj2uLcp7Q"
 user_api_key = st.text_input("מפתח Google API:", value=DEFAULT_API_KEY, type="password")
 
@@ -113,12 +113,10 @@ if uploaded_file:
                         ]
                     }
                     
-                    # רשימת מודלים נתמכים
+                    # שימוש במודלים הנתמכים והיציבים בלבד
                     models_to_try = [
-                        "gemini-2.0-flash",
                         "gemini-1.5-flash",
-                        "gemini-2.5-flash",
-                        "gemini-1.5-pro"
+                        "gemini-1.5-flash-latest"
                     ]
                     
                     res_data = None
@@ -129,7 +127,6 @@ if uploaded_file:
                     for model_name in models_to_try:
                         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key_clean}"
                         
-                        # ניסיונות חוזרים עם השהיה קצרה במקרה של עומס רגעי (503)
                         for attempt in range(2):
                             res = requests.post(url, headers=headers, json=payload)
                             res_json = res.json()
@@ -141,7 +138,7 @@ if uploaded_file:
                             else:
                                 last_error_msg = str(res_json)
                                 if "503" in last_error_msg or "UNAVAILABLE" in last_error_msg:
-                                    time.sleep(1.5) # השהיה קצרה לפני ניסיון חוזר
+                                    time.sleep(1.5)
                                 else:
                                     break
                                     
