@@ -79,10 +79,8 @@ if uploaded_file:
             try:
                 # המרת התמונה ל-Base64
                 buffered = io.BytesIO()
-                image.save(buffered, format="JPEG")
+                image.convert("RGB").save(buffered, format="JPEG")
                 img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                
-                url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
                 
                 headers = {
                     "Content-Type": "application/json",
@@ -114,34 +112,51 @@ if uploaded_file:
                     ]
                 }
                 
-                res = requests.post(url, headers=headers, json=payload)
-                res_data = res.json()
+                # רשימת מודלים לניסיון
+                models_to_try = [
+                    "gemini-1.5-flash",
+                    "gemini-2.0-flash",
+                    "gemini-flash-latest"
+                ]
                 
-                if "error" in res_data:
-                    # ניסיון גיבוי עם דגם flash-latest אם 2.5 לא זמין במפתח זה
-                    url_alt = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
-                    res = requests.post(url_alt, headers=headers, json=payload)
-                    res_data = res.json()
+                res_data = None
+                success = False
+                last_error_msg = ""
                 
-                text_response = res_data['candidates'][0]['content']['parts'][0]['text']
-                clean_json = text_response.replace("```json", "").replace("```", "").strip()
-                raw_data = json.loads(clean_json)
+                for model_name in models_to_try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                    res = requests.post(url, headers=headers, json=payload)
+                    res_json = res.json()
+                    
+                    if "candidates" in res_json and len(res_json["candidates"]) > 0:
+                        res_data = res_json
+                        success = True
+                        break
+                    else:
+                        last_error_msg = str(res_json)
                 
-                df = process_attendance_data(raw_data)
-                
-                output_path = "attendance_summary.xlsx"
-                df.to_excel(output_path, index=False)
-                
-                st.success("העיבוד הושלם בהצלחה!")
-                st.dataframe(df)
-                
-                with open(output_path, "rb") as file:
-                    st.download_button(
-                        label="📥 הורד קובץ אקסל",
-                        data=file,
-                        file_name=f"attendance_{datetime.date.today()}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                if not success:
+                    st.error(f"שגיאת תקשורת מול גוגל: {last_error_msg}")
+                else:
+                    text_response = res_data['candidates'][0]['content']['parts'][0]['text']
+                    clean_json = text_response.replace("```json", "").replace("```", "").strip()
+                    raw_data = json.loads(clean_json)
+                    
+                    df = process_attendance_data(raw_data)
+                    
+                    output_path = "attendance_summary.xlsx"
+                    df.to_excel(output_path, index=False)
+                    
+                    st.success("העיבוד הושלם בהצלחה!")
+                    st.dataframe(df)
+                    
+                    with open(output_path, "rb") as file:
+                        st.download_button(
+                            label="📥 הורד קובץ אקסל",
+                            data=file,
+                            file_name=f"attendance_{datetime.date.today()}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
             except Exception as e:
                 st.error(f"שגיאה בעיבוד: {e}")
