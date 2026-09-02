@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import math
 import datetime
-import openpyxl
-from google import genai
+import requests
+import base64
+import io
 from PIL import Image
 import json
 
@@ -12,7 +13,7 @@ st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", 
 st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# מפתח API מוטמע בקוד
+# המפתח שלך
 API_KEY = "AQ.Ab8RN6I6EfPCP8CuOz0ff-Vkrg11f1uQJvkg5mnE1qvQ1BvmeQ"
 
 uploaded_file = st.file_uploader("צלם או העלה תמונה של הדו\"ח:", type=["jpg", "jpeg", "png"])
@@ -76,7 +77,17 @@ if uploaded_file:
     if st.button("🚀 עבד והפק אקסל", use_container_width=True):
         with st.spinner("מפענח את התמונה ומחשב נתונים..."):
             try:
-                client = genai.Client(api_key=API_KEY)
+                # המרת התמונה ל-Base64
+                buffered = io.BytesIO()
+                image.save(buffered, format="JPEG")
+                img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                
+                url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-goog-api-key": API_KEY
+                }
                 
                 prompt = """
                 חלץ מתמונת דוח הנוכחות את כל הימים בחודש.
@@ -87,12 +98,33 @@ if uploaded_file:
                 ]
                 """
                 
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=[image, prompt]
-                )
+                payload = {
+                    "contents": [
+                        {
+                            "parts": [
+                                {"text": prompt},
+                                {
+                                    "inline_data": {
+                                        "mime_type": "image/jpeg",
+                                        "data": img_b64
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
                 
-                clean_json = response.text.replace("```json", "").replace("```", "").strip()
+                res = requests.post(url, headers=headers, json=payload)
+                res_data = res.json()
+                
+                if "error" in res_data:
+                    # ניסיון גיבוי עם דגם flash-latest אם 2.5 לא זמין במפתח זה
+                    url_alt = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+                    res = requests.post(url_alt, headers=headers, json=payload)
+                    res_data = res.json()
+                
+                text_response = res_data['candidates'][0]['content']['parts'][0]['text']
+                clean_json = text_response.replace("```json", "").replace("```", "").strip()
                 raw_data = json.loads(clean_json)
                 
                 df = process_attendance_data(raw_data)
