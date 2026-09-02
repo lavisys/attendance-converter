@@ -12,7 +12,7 @@ st.set_page_config(page_title="ממיר דוח נוכחות", page_icon="📅", 
 st.title("📅 ממיר דוח נוכחות לאקסל")
 st.write("העלה תמונה של הדו\"ח וקבל קובץ אקסל מעובד ומאוזן לפי 9 שעות יומית.")
 
-# מפתח API מוטמע בקוד
+# מפתח API מוטמע ישירות בקוד (ללא שדה קלט במסך)
 API_KEY = "AQ.Ab8RN6I6EfPCP8CuOz0ff-Vkrg11f1uQJvkg5mnE1qvQ1BvmeQ"
 
 uploaded_file = st.file_uploader("צלם או העלה תמונה של הדו\"ח:", type=["jpg", "jpeg", "png"])
